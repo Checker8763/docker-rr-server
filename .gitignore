@@ -1,0 +1,21 @@
+# Secrets / local configuration
+.env
+access
+**/access
+
+# Runtime data (SteamCMD install, Wine prefixes, results, logs)
+data/**
+!data/*/
+!data/*/.gitkeep
+*.log
+
+# Editor/OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Local build/analysis directories, exported images
+build/
+dist/
+__pycache__/

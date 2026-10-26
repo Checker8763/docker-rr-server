@@ -1,0 +1,180 @@
+From 3cb15aec25472cb809b31b15f3358f8e40dcb871 Mon Sep 17 00:00:00 2001
+From: Tomek Kochanowsy <39644556+Checker8763@users.noreply.github.com>
+Date: Tue, 6 Oct 2026 21:18:57 +0200
+Subject: [PATCH 1/4] httpapi: Do not queue IOCP completions for internal
+ synchronous I/O.
+
+When the caller passes no OVERLAPPED, HttpReceiveHttpRequest(),
+HttpReceiveRequestEntityBody(), HttpSendHttpResponse() and
+HttpSendResponseEntityBody() used an internal OVERLAPPED whose event did
+not have the low-order bit set. If the request queue handle is bound to
+an I/O completion port (as done by .NET's HttpListener), a completion
+packet pointing to a stack OVERLAPPED was queued, and the port consumer
+crashed (AccessViolation in System.Threading.Overlapped.get_iocbHelper).
+Windows does not notify the port for synchronous calls.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+SPDX-License-Identifier: LGPL-2.1-or-later
+---
+ dlls/httpapi/httpapi_main.c | 65 +++++++++++++++++++++++++------------
+ 1 file changed, 45 insertions(+), 20 deletions(-)
+
+diff --git a/dlls/httpapi/httpapi_main.c b/dlls/httpapi/httpapi_main.c
+index 28d67c9..e22d219 100644
+--- a/dlls/httpapi/httpapi_main.c
++++ b/dlls/httpapi/httpapi_main.c
+@@ -266,6 +266,33 @@ ULONG WINAPI HttpRemoveUrl(HANDLE queue, const WCHAR *url)
+     return remove_url(queue, url);
+ }
+ 
++/* Event for internal synchronous I/O. Bit 0 set: no completion packet is
++ * queued to an I/O completion port the handle may be bound to (as on
++ * Windows, synchronous calls must not notify the port). */
++static HANDLE create_sync_event(OVERLAPPED *ovl)
++{
++    HANDLE event = CreateEventW(NULL, TRUE, FALSE, NULL);
++    memset(ovl, 0, sizeof(*ovl));
++    ovl->hEvent = (HANDLE)((ULONG_PTR)event | 1);
++    return event;
++}
++
++static ULONG finish_sync_io(HANDLE queue, OVERLAPPED *ovl, HANDLE event, ULONG ret, ULONG *ret_size)
++{
++    DWORD size;
++
++    if (ret == ERROR_IO_PENDING)
++    {
++        ret = ERROR_SUCCESS;
++        if (!GetOverlappedResult(queue, ovl, &size, TRUE))
++            ret = GetLastError();
++        if (ret_size)
++            *ret_size = size;
++    }
++    CloseHandle(event);
++    return ret;
++}
++
+ /***********************************************************************
+  *        HttpReceiveRequestEntityBody     (HTTPAPI.@)
+  */
+@@ -280,6 +307,7 @@ ULONG WINAPI HttpReceiveRequestEntityBody(HANDLE queue, HTTP_REQUEST_ID id, ULON
+     ULONG ret = ERROR_SUCCESS;
+     ULONG local_ret_size;
+     OVERLAPPED sync_ovl;
++    HANDLE sync_event = NULL;
+ 
+     TRACE("queue %p, id %s, flags %#lx, buffer %p, size %#lx, ret_size %p, ovl %p.\n",
+             queue, wine_dbgstr_longlong(id), flags, buffer, size, ret_size, ovl);
+@@ -289,7 +317,7 @@ ULONG WINAPI HttpReceiveRequestEntityBody(HANDLE queue, HTTP_REQUEST_ID id, ULON
+ 
+     if (!ovl)
+     {
+-        sync_ovl.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
++        sync_event = create_sync_event(&sync_ovl);
+         ovl = &sync_ovl;
+     }
+ 
+@@ -300,15 +328,7 @@ ULONG WINAPI HttpReceiveRequestEntityBody(HANDLE queue, HTTP_REQUEST_ID id, ULON
+         ret = GetLastError();
+ 
+     if (ovl == &sync_ovl)
+-    {
+-        if (ret == ERROR_IO_PENDING)
+-        {
+-            ret = ERROR_SUCCESS;
+-            if (!GetOverlappedResult(queue, ovl, ret_size, TRUE))
+-                ret = GetLastError();
+-        }
+-        CloseHandle(sync_ovl.hEvent);
+-    }
++        ret = finish_sync_io(queue, ovl, sync_event, ret, ret_size);
+ 
+     return ret;
+ }
+@@ -329,6 +349,7 @@ ULONG WINAPI HttpReceiveHttpRequest(HANDLE queue, HTTP_REQUEST_ID id, ULONG flag
+     ULONG ret = ERROR_SUCCESS;
+     ULONG local_ret_size;
+     OVERLAPPED sync_ovl;
++    HANDLE sync_event = NULL;
+ 
+     TRACE("queue %p, id %s, flags %#lx, request %p, size %#lx, ret_size %p, ovl %p.\n",
+             queue, wine_dbgstr_longlong(id), flags, request, size, ret_size, ovl);
+@@ -341,7 +362,7 @@ ULONG WINAPI HttpReceiveHttpRequest(HANDLE queue, HTTP_REQUEST_ID id, ULONG flag
+ 
+     if (!ovl)
+     {
+-        sync_ovl.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
++        sync_event = create_sync_event(&sync_ovl);
+         ovl = &sync_ovl;
+     }
+ 
+@@ -352,15 +373,7 @@ ULONG WINAPI HttpReceiveHttpRequest(HANDLE queue, HTTP_REQUEST_ID id, ULONG flag
+         ret = GetLastError();
+ 
+     if (ovl == &sync_ovl)
+-    {
+-        if (ret == ERROR_IO_PENDING)
+-        {
+-            ret = ERROR_SUCCESS;
+-            if (!GetOverlappedResult(queue, ovl, ret_size, TRUE))
+-                ret = GetLastError();
+-        }
+-        CloseHandle(sync_ovl.hEvent);
+-    }
++        ret = finish_sync_io(queue, ovl, sync_event, ret, ret_size);
+ 
+     return ret;
+ }
+@@ -420,6 +433,7 @@ ULONG WINAPI HttpSendHttpResponse(HANDLE queue, HTTP_REQUEST_ID id, ULONG flags,
+ 
+     struct http_response *buffer;
+     OVERLAPPED dummy_ovl = {};
++    HANDLE sync_event = NULL;
+     ULONG ret = ERROR_SUCCESS;
+     int len, body_len = 0;
+     char *p, dummy[12];
+@@ -506,12 +520,18 @@ ULONG WINAPI HttpSendHttpResponse(HANDLE queue, HTTP_REQUEST_ID id, ULONG flags,
+     }
+ 
+     if (!ovl)
++    {
++        sync_event = create_sync_event(&dummy_ovl);
+         ovl = &dummy_ovl;
++    }
+ 
+     if (!DeviceIoControl(queue, IOCTL_HTTP_SEND_RESPONSE, buffer,
+             offsetof(struct http_response, buffer[len]), NULL, 0, NULL, ovl))
+         ret = GetLastError();
+ 
++    if (ovl == &dummy_ovl)
++        ret = finish_sync_io(queue, ovl, sync_event, ret, NULL);
++
+     free(buffer);
+     return ret;
+ }
+@@ -543,6 +563,7 @@ ULONG WINAPI HttpSendResponseEntityBody(HANDLE queue, HTTP_REQUEST_ID id,
+ {
+     struct http_response *buffer;
+     OVERLAPPED dummy_ovl = {};
++    HANDLE sync_event = NULL;
+     ULONG ret = NO_ERROR;
+     int len = 0;
+     char *p;
+@@ -588,6 +609,7 @@ ULONG WINAPI HttpSendResponseEntityBody(HANDLE queue, HTTP_REQUEST_ID id,
+ 
+     if (!ovl)
+     {
++        sync_event = create_sync_event(&dummy_ovl);
+         ovl = &dummy_ovl;
+         if (ret_size)
+             *ret_size = len;
+@@ -597,6 +619,9 @@ ULONG WINAPI HttpSendResponseEntityBody(HANDLE queue, HTTP_REQUEST_ID id,
+             offsetof(struct http_response, buffer[len]), NULL, 0, NULL, ovl))
+         ret = GetLastError();
+ 
++    if (ovl == &dummy_ovl)
++        ret = finish_sync_io(queue, ovl, sync_event, ret, NULL);
++
+     free(buffer);
+     return ret;
+ }

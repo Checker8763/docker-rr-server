@@ -1,0 +1,22 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Version pins in the Dockerfile marked with a '# renovate:' comment",
+      "managerFilePatterns": ["/^Dockerfile$/"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: registryUrl=(?<registryUrl>\\S+))?\\nARG \\w+=(?<currentValue>\\S+)"
+      ]
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Updating these needs manual follow-up (see docs/BUILD.md#updating-versions)",
+      "matchDepNames": ["winehq-stable", "Winetricks/winetricks"],
+      "dependencyDashboardApproval": true,
+      "prBodyNotes": ["Also update WINETRICKS_SHA256, or wine-httpapi/ (WINE_VERSION, patches) for a Wine update."]
+    }
+  ]
+}

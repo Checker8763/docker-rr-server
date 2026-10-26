@@ -1,0 +1,29 @@
+# Build step: creates the named images, starts nothing.
+#   docker compose -f docker-compose.build.yml build
+# Then start with docker-compose.yml or docker-compose.traefik.yml (docs/BUILD.md).
+name: raceroom-build
+
+services:
+  # Server image
+  raceroom:
+    build:
+      context: .
+      # full: .NET baked in (default); public: without .NET, as published by CI
+      target: ${RR_TARGET:-full}
+      args:
+        UID: ${PUID:-1000}
+        GID: ${PGID:-1000}
+        VERSION: ${RR_VERSION:-dev}
+        REVISION: ${RR_REVISION:-unknown}
+        SOURCE: ${RR_SOURCE:-unknown}
+      # Patched Wine DLLs from the wine-httpapi service
+      additional_contexts:
+        httpapi: service:wine-httpapi
+    image: ${RR_IMAGE:-docker-rr-server:local}
+
+  # Artifact image with the patched Wine DLLs (wine-httpapi/README.md)
+  wine-httpapi:
+    build:
+      context: ./wine-httpapi
+      target: artifacts
+    image: ${RR_HTTPAPI_IMAGE:-docker-rr-server-httpapi:local}

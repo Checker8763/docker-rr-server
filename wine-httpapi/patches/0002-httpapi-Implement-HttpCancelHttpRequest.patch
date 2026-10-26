@@ -1,0 +1,136 @@
+From 603ac3b5c503b185f08c3eb1247abbfc6e11b4b8 Mon Sep 17 00:00:00 2001
+From: Tomek Kochanowsy <39644556+Checker8763@users.noreply.github.com>
+Date: Tue, 6 Oct 2026 21:19:16 +0200
+Subject: [PATCH 2/4] httpapi: Implement HttpCancelHttpRequest().
+
+Add IOCTL_HTTP_CANCEL_REQUEST to http.sys, which closes the connection
+belonging to the given request ID. .NET's HttpListener calls
+HttpCancelHttpRequest() when aborting a context and when stopping; the
+stub aborted the process ("unimplemented function").
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+SPDX-License-Identifier: LGPL-2.1-or-later
+---
+ dlls/http.sys/http.c        | 26 ++++++++++++++++++++++++++
+ dlls/httpapi/httpapi.spec   |  2 +-
+ dlls/httpapi/httpapi_main.c | 27 +++++++++++++++++++++++++++
+ include/wine/http.h         |  6 ++++++
+ 4 files changed, 60 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/http.sys/http.c b/dlls/http.sys/http.c
+index 3af2d51..9396cf9 100644
+--- a/dlls/http.sys/http.c
++++ b/dlls/http.sys/http.c
+@@ -1081,6 +1081,29 @@ static NTSTATUS http_receive_body(struct request_queue *queue, IRP *irp)
+     return ret;
+ }
+ 
++static NTSTATUS http_cancel_request(struct request_queue *queue, IRP *irp)
++{
++    const struct http_cancel_request_params *params = irp->AssociatedIrp.SystemBuffer;
++    struct connection *conn;
++    NTSTATUS ret;
++
++    TRACE("id %s.\n", wine_dbgstr_longlong(params->id));
++
++    EnterCriticalSection(&http_cs);
++
++    if (params->id != HTTP_NULL_ID && (conn = get_connection(params->id)))
++    {
++        close_connection(conn);
++        ret = STATUS_SUCCESS;
++    }
++    else
++        ret = STATUS_CONNECTION_INVALID;
++
++    LeaveCriticalSection(&http_cs);
++
++    return ret;
++}
++
+ static NTSTATUS WINAPI dispatch_ioctl(DEVICE_OBJECT *device, IRP *irp)
+ {
+     IO_STACK_LOCATION *stack = IoGetCurrentIrpStackLocation(irp);
+@@ -1104,6 +1127,9 @@ static NTSTATUS WINAPI dispatch_ioctl(DEVICE_OBJECT *device, IRP *irp)
+     case IOCTL_HTTP_RECEIVE_BODY:
+         ret = http_receive_body(queue, irp);
+         break;
++    case IOCTL_HTTP_CANCEL_REQUEST:
++        ret = http_cancel_request(queue, irp);
++        break;
+     default:
+         FIXME("Unhandled ioctl %#lx.\n", stack->Parameters.DeviceIoControl.IoControlCode);
+         ret = STATUS_NOT_IMPLEMENTED;
+diff --git a/dlls/httpapi/httpapi.spec b/dlls/httpapi/httpapi.spec
+index 7a5f275..0a60423 100644
+--- a/dlls/httpapi/httpapi.spec
++++ b/dlls/httpapi/httpapi.spec
+@@ -1,7 +1,7 @@
+ @ stub HttpAddFragmentToCache
+ @ stdcall HttpAddUrl(ptr wstr ptr)
+ @ stdcall HttpAddUrlToUrlGroup(int64 wstr int64 long)
+-@ stub HttpCancelHttpRequest
++@ stdcall HttpCancelHttpRequest(ptr int64 ptr)
+ @ stdcall HttpCloseRequestQueue(ptr)
+ @ stdcall HttpCloseServerSession(int64)
+ @ stdcall HttpCloseUrlGroup(int64)
+diff --git a/dlls/httpapi/httpapi_main.c b/dlls/httpapi/httpapi_main.c
+index e22d219..d5f3e51 100644
+--- a/dlls/httpapi/httpapi_main.c
++++ b/dlls/httpapi/httpapi_main.c
+@@ -626,6 +626,33 @@ ULONG WINAPI HttpSendResponseEntityBody(HANDLE queue, HTTP_REQUEST_ID id,
+     return ret;
+ }
+ 
++/***********************************************************************
++ *        HttpCancelHttpRequest     (HTTPAPI.@)
++ */
++ULONG WINAPI HttpCancelHttpRequest(HANDLE queue, HTTP_REQUEST_ID id, OVERLAPPED *ovl)
++{
++    struct http_cancel_request_params params = {.id = id};
++    OVERLAPPED sync_ovl;
++    HANDLE sync_event = NULL;
++    ULONG ret = ERROR_SUCCESS;
++
++    TRACE("queue %p, id %s, ovl %p.\n", queue, wine_dbgstr_longlong(id), ovl);
++
++    if (!ovl)
++    {
++        sync_event = create_sync_event(&sync_ovl);
++        ovl = &sync_ovl;
++    }
++
++    if (!DeviceIoControl(queue, IOCTL_HTTP_CANCEL_REQUEST, &params, sizeof(params), NULL, 0, NULL, ovl))
++        ret = GetLastError();
++
++    if (ovl == &sync_ovl)
++        ret = finish_sync_io(queue, ovl, sync_event, ret, NULL);
++
++    return ret;
++}
++
+ struct url_group
+ {
+     struct list entry, session_entry;
+diff --git a/include/wine/http.h b/include/wine/http.h
+index 4a44392..def7c69 100644
+--- a/include/wine/http.h
++++ b/include/wine/http.h
+@@ -28,6 +28,7 @@
+ #define IOCTL_HTTP_RECEIVE_REQUEST  CTL_CODE(FILE_DEVICE_UNKNOWN, 0x802, METHOD_BUFFERED, 0)
+ #define IOCTL_HTTP_SEND_RESPONSE    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x803, METHOD_BUFFERED, 0)
+ #define IOCTL_HTTP_RECEIVE_BODY     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x804, METHOD_BUFFERED, 0)
++#define IOCTL_HTTP_CANCEL_REQUEST   CTL_CODE(FILE_DEVICE_UNKNOWN, 0x805, METHOD_BUFFERED, 0)
+ 
+ struct http_add_url_params
+ {
+@@ -57,4 +58,9 @@ struct http_receive_body_params
+     ULONG bits;
+ };
+ 
++struct http_cancel_request_params
++{
++    HTTP_REQUEST_ID id;
++};
++
+ #endif

@@ -1,0 +1,16 @@
+.git
+.env
+access
+data/
+docs/
+*.md
+!README.md
+build/
+dist/
+# Development only, not part of the image
+**/test_*.py
+**/test-*.sh
+**/__pycache__
+scripts/lint.sh
+scripts/export-image.sh
+scripts/check-public-image.sh

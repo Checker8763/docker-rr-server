@@ -1,0 +1,62 @@
+# RaceRoom Dedicated Server – runtime behind an existing Traefik.
+# Self-contained (e.g. to paste into Komodo/Portainer); Traefik itself is not included.
+#   docker compose -f docker-compose.traefik.yml up -d
+# The web UI is only reachable through Traefik (no port 8088 on the host);
+# the game ports are still published directly (UDP/TCP, not through Traefik).
+# Build or load the image first (docs/BUILD.md); variables: docs/CONFIGURATION.md
+name: raceroom
+
+services:
+  raceroom:
+    image: ${RR_IMAGE:-docker-rr-server:local}
+    pull_policy: ${RR_PULL_POLICY:-missing}
+    container_name: raceroom
+    restart: unless-stopped
+    environment:
+      WEBUI_USERS: ${WEBUI_USERS:-}
+      REGISTER_PHRASE: ${REGISTER_PHRASE:-}
+      AUTOSTART: ${AUTOSTART:-false}
+      WEBUI_WATCHDOG_MINUTES: ${WEBUI_WATCHDOG_MINUTES:-5}
+      BACKUP_HOURS: ${BACKUP_HOURS:-24}
+      BACKUP_KEEP: ${BACKUP_KEEP:-14}
+      UPDATE_ON_START: ${UPDATE_ON_START:-true}
+      STEAMCMD_RETRIES: ${STEAMCMD_RETRIES:-5}
+      STEAMCMD_RETRY_DELAY: ${STEAMCMD_RETRY_DELAY:-10}
+      STEAM_USER: ${STEAM_USER:-}
+      STEAM_PASS: ${STEAM_PASS:-}
+      # Published image only: "yes" accepts the .NET Framework license (README.md#licenses)
+      ACCEPT_MICROSOFT_DOTNET_LICENSE: ${ACCEPT_MICROSOFT_DOTNET_LICENSE:-}
+    volumes:
+      # All data; subdirectories are created on start (docs/CONFIGURATION.md#volumes):
+      # raceroom/ installation + access file, appdata/ manager login/config/log,
+      # userdata/ results/logs/replays, backups/ daily settings backups, wine/ Wine prefix (published image only)
+      - ${RR_DATA_DIR:-./data}:/data
+    ports:
+      # Game ports for up to 5 instances (the backend quota per IP), 3 per instance:
+      # 60000-60002 instance 1, 60003-60005 instance 2, ... 60012-60014 instance 5
+      - "60000-60014:60000-60014/udp"
+      - "60000-60014:60000-60014/tcp"
+    networks:
+      - default
+      - traefik
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: ${TRAEFIK_NETWORK:-traefik}
+      traefik.http.routers.raceroom.rule: Host(`${TRAEFIK_HOST:?set TRAEFIK_HOST}`)
+      traefik.http.routers.raceroom.entrypoints: ${TRAEFIK_ENTRYPOINT:-websecure}
+      traefik.http.routers.raceroom.tls: "true"
+      traefik.http.routers.raceroom.tls.certresolver: ${TRAEFIK_CERTRESOLVER:-letsencrypt}
+      traefik.http.services.raceroom.loadbalancer.server.port: "8088"
+    stop_grace_period: 30s
+    # Docker keeps at most 3 x 10 MB of container logs
+    logging:
+      options:
+        max-size: 10m
+        max-file: "3"
+    security_opt:
+      - no-new-privileges:true
+
+networks:
+  traefik:
+    name: ${TRAEFIK_NETWORK:-traefik}
+    external: true

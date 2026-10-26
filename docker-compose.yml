@@ -1,0 +1,45 @@
+# RaceRoom Dedicated Server – runtime (build or load the image first, docs/BUILD.md).
+# Configuration via .env (see .env.example and docs/CONFIGURATION.md).
+#   docker compose up -d
+name: raceroom
+
+services:
+  raceroom:
+    image: ${RR_IMAGE:-docker-rr-server:local}
+    pull_policy: ${RR_PULL_POLICY:-missing}
+    container_name: raceroom
+    restart: unless-stopped
+    environment:
+      WEBUI_USERS: ${WEBUI_USERS:-}
+      REGISTER_PHRASE: ${REGISTER_PHRASE:-}
+      AUTOSTART: ${AUTOSTART:-false}
+      WEBUI_WATCHDOG_MINUTES: ${WEBUI_WATCHDOG_MINUTES:-5}
+      BACKUP_HOURS: ${BACKUP_HOURS:-24}
+      BACKUP_KEEP: ${BACKUP_KEEP:-14}
+      UPDATE_ON_START: ${UPDATE_ON_START:-true}
+      STEAMCMD_RETRIES: ${STEAMCMD_RETRIES:-5}
+      STEAMCMD_RETRY_DELAY: ${STEAMCMD_RETRY_DELAY:-10}
+      STEAM_USER: ${STEAM_USER:-}
+      STEAM_PASS: ${STEAM_PASS:-}
+      # Published image only: "yes" accepts the .NET Framework license (README.md#licenses)
+      ACCEPT_MICROSOFT_DOTNET_LICENSE: ${ACCEPT_MICROSOFT_DOTNET_LICENSE:-}
+    volumes:
+      # All data; subdirectories are created on start (docs/CONFIGURATION.md#volumes):
+      # raceroom/ installation + access file, appdata/ manager login/config/log,
+      # userdata/ results/logs/replays, backups/ daily settings backups, wine/ Wine prefix (published image only)
+      - ${RR_DATA_DIR:-./data}:/data
+    ports:
+      # Game ports for up to 5 instances (the backend quota per IP), 3 per instance:
+      # 60000-60002 instance 1, 60003-60005 instance 2, ... 60012-60014 instance 5
+      - "60000-60014:60000-60014/udp"
+      - "60000-60014:60000-60014/tcp"
+      # Web UI
+      - "8088:8088/tcp"
+    stop_grace_period: 30s
+    # Docker keeps at most 3 x 10 MB of container logs
+    logging:
+      options:
+        max-size: 10m
+        max-file: "3"
+    security_opt:
+      - no-new-privileges:true

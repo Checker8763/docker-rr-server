@@ -1,0 +1,45 @@
+From 0321d3655d8ad9f08ae20c2115e4b94f4a8cc40c Mon Sep 17 00:00:00 2001
+From: Tomek Kochanowsy <39644556+Checker8763@users.noreply.github.com>
+Date: Tue, 6 Oct 2026 21:19:16 +0200
+Subject: [PATCH 3/4] http.sys: Hand out pending requests from any connection.
+
+For IOCTL_HTTP_RECEIVE_REQUEST with HTTP_NULL_ID, get_connection() only
+returned the first connection without a request ID, which is often an
+idle keep-alive connection. A request that had been parsed on another
+connection while no IRP was queued was never handed out, so the client
+waited forever (seen with browsers keeping several connections open).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+SPDX-License-Identifier: LGPL-2.1-or-later
+---
+ dlls/http.sys/http.c | 17 ++++++++++++++++-
+ 1 file changed, 16 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/http.sys/http.c b/dlls/http.sys/http.c
+index 9396cf9..35ec447 100644
+--- a/dlls/http.sys/http.c
++++ b/dlls/http.sys/http.c
+@@ -961,7 +961,22 @@ static NTSTATUS http_receive_request(struct request_queue *queue, IRP *irp)
+ 
+     EnterCriticalSection(&http_cs);
+ 
+-    if ((conn = get_connection(params->id)) && conn->available && conn->queue == queue)
++    if (params->id == HTTP_NULL_ID)
++    {
++        /* Any connection may hold a parsed request that arrived while no IRP
++         * was queued; get_connection(HTTP_NULL_ID) would only return the first
++         * connection without a request ID, which may be an idle one. */
++        LIST_FOR_EACH_ENTRY(conn, &connections, struct connection, entry)
++        {
++            if (conn->available && conn->queue == queue && conn->req_id == HTTP_NULL_ID)
++            {
++                ret = complete_irp(conn, irp);
++                LeaveCriticalSection(&http_cs);
++                return ret;
++            }
++        }
++    }
++    else if ((conn = get_connection(params->id)) && conn->available && conn->queue == queue)
+     {
+         ret = complete_irp(conn, irp);
+         LeaveCriticalSection(&http_cs);
